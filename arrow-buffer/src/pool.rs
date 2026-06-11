@@ -33,6 +33,18 @@ use std::fmt::Debug;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+/// Error returned when a [`MemoryPool`] cannot satisfy a reservation request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemoryAllocationError(pub String);
+
+impl std::fmt::Display for MemoryAllocationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "memory pool allocation failed: {}", self.0)
+    }
+}
+
+impl std::error::Error for MemoryAllocationError {}
+
 /// A memory reservation within a [`MemoryPool`] that is freed on drop
 pub trait MemoryReservation: Debug + Send + Sync {
     /// Returns the size of this reservation in bytes.
@@ -40,6 +52,16 @@ pub trait MemoryReservation: Debug + Send + Sync {
 
     /// Resize this reservation to a new size in bytes.
     fn resize(&mut self, new_size: usize);
+
+    /// Attempt to resize this reservation to `new_size` bytes.
+    ///
+    /// The default implementation is infallible (always succeeds). Override this
+    /// method to enforce capacity limits and return [`MemoryAllocationError`]
+    /// when the pool is exhausted.
+    fn try_resize(&mut self, new_size: usize) -> Result<(), MemoryAllocationError> {
+        self.resize(new_size);
+        Ok(())
+    }
 }
 
 /// A pool of memory that can be reserved and released.
@@ -75,6 +97,15 @@ pub trait MemoryPool: Debug + Send + Sync {
     ///
     /// Returns a reservation of the requested size.
     fn reserve(&self, size: usize) -> Box<dyn MemoryReservation>;
+
+    /// Attempt to reserve `size` bytes from the pool.
+    ///
+    /// The default implementation is infallible (always succeeds). Override this
+    /// method to enforce capacity limits and return [`MemoryAllocationError`]
+    /// when the pool is exhausted.
+    fn try_reserve(&self, size: usize) -> Result<Box<dyn MemoryReservation>, MemoryAllocationError> {
+        Ok(self.reserve(size))
+    }
 
     /// Returns the current available memory in the pool.
     ///

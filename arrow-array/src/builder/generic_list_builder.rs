@@ -15,6 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
+use crate::builder::tracked_vec::TrackedVec;
 use crate::builder::ArrayBuilder;
 use crate::{Array, ArrayRef, GenericListArray, OffsetSizeTrait};
 use arrow_buffer::NullBufferBuilder;
@@ -86,7 +87,7 @@ use std::sync::Arc;
 /// [`LargeListArray`]: crate::array::LargeListArray
 #[derive(Debug)]
 pub struct GenericListBuilder<OffsetSize: OffsetSizeTrait, T: ArrayBuilder> {
-    offsets_builder: Vec<OffsetSize>,
+    offsets_builder: TrackedVec<OffsetSize>,
     null_buffer_builder: NullBufferBuilder,
     values_builder: T,
     field: Option<FieldRef>,
@@ -108,7 +109,7 @@ impl<OffsetSize: OffsetSizeTrait, T: ArrayBuilder> GenericListBuilder<OffsetSize
     /// Creates a new [`GenericListBuilder`] from a given values array builder
     /// `capacity` is the number of items to pre-allocate space for in this builder
     pub fn with_capacity(values_builder: T, capacity: usize) -> Self {
-        let mut offsets_builder = Vec::with_capacity(capacity + 1);
+        let mut offsets_builder = TrackedVec::with_capacity(capacity + 1);
         offsets_builder.push(OffsetSize::zero());
         Self {
             offsets_builder,
@@ -129,6 +130,24 @@ impl<OffsetSize: OffsetSizeTrait, T: ArrayBuilder> GenericListBuilder<OffsetSize
             field: Some(field.into()),
             ..self
         }
+    }
+
+    /// Attaches a memory pool to this builder so all buffer growth is tracked.
+    ///
+    /// Also propagates the pool to the child `values_builder` if it implements
+    /// [`WithPool`](crate::builder::WithPool).
+    ///
+    /// Returns `Err` if the pool is already exhausted.
+    #[cfg(feature = "pool")]
+    pub fn with_pool(mut self, pool: &dyn arrow_buffer::MemoryPool) -> Result<Self, arrow_schema::ArrowError>
+    where
+        T: crate::builder::WithPool,
+    {
+        self.offsets_builder
+            .attach_pool(pool)
+            .map_err(|e| arrow_schema::ArrowError::ExternalError(Box::new(e)))?;
+        self.values_builder = crate::builder::WithPool::with_pool(self.values_builder, pool)?;
+        Ok(self)
     }
 }
 
@@ -303,7 +322,7 @@ where
         let values = self.values_builder.finish();
         let nulls = self.null_buffer_builder.finish();
 
-        let offsets = Buffer::from_vec(std::mem::take(&mut self.offsets_builder));
+        let offsets: Buffer = std::mem::take(&mut self.offsets_builder).into();
         // Safety: Safe by construction
         let offsets = unsafe { OffsetBuffer::new_unchecked(offsets.into()) };
         self.offsets_builder.push(OffsetSize::zero());
@@ -337,7 +356,7 @@ where
         let values = self.values_builder.finish_preserve_values();
         let nulls = self.null_buffer_builder.finish();
 
-        let offsets = Buffer::from_vec(std::mem::take(&mut self.offsets_builder));
+        let offsets: Buffer = std::mem::take(&mut self.offsets_builder).into();
         // Safety: Safe by construction
         let offsets = unsafe { OffsetBuffer::new_unchecked(offsets.into()) };
         self.offsets_builder.push(OffsetSize::zero());

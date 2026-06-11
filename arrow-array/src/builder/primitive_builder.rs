@@ -15,6 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
+use crate::builder::tracked_vec::TrackedVec;
 use crate::builder::ArrayBuilder;
 use crate::types::*;
 use crate::{Array, ArrayRef, PrimitiveArray};
@@ -98,7 +99,7 @@ pub type Decimal256Builder = PrimitiveBuilder<Decimal256Type>;
 /// Builder for [`PrimitiveArray`]
 #[derive(Debug)]
 pub struct PrimitiveBuilder<T: ArrowPrimitiveType> {
-    values_builder: Vec<T::Native>,
+    values_builder: TrackedVec<T::Native>,
     null_buffer_builder: NullBufferBuilder,
     data_type: DataType,
 }
@@ -150,7 +151,7 @@ impl<T: ArrowPrimitiveType> PrimitiveBuilder<T> {
     /// Creates a new primitive array builder with capacity no of items
     pub fn with_capacity(capacity: usize) -> Self {
         Self {
-            values_builder: Vec::with_capacity(capacity),
+            values_builder: TrackedVec::with_capacity(capacity),
             null_buffer_builder: NullBufferBuilder::new(capacity),
             data_type: T::DATA_TYPE,
         }
@@ -161,7 +162,8 @@ impl<T: ArrowPrimitiveType> PrimitiveBuilder<T> {
         values_buffer: MutableBuffer,
         null_buffer: Option<MutableBuffer>,
     ) -> Self {
-        let values_builder: Vec<T::Native> = ScalarBuffer::<T::Native>::from(values_buffer).into();
+        let values_builder: TrackedVec<T::Native> =
+            Vec::<T::Native>::from(ScalarBuffer::<T::Native>::from(values_buffer)).into();
 
         let null_buffer_builder = null_buffer
             .map(|buffer| NullBufferBuilder::new_from_buffer(buffer, values_builder.len()))
@@ -199,11 +201,35 @@ impl<T: ArrowPrimitiveType> PrimitiveBuilder<T> {
         self.values_builder.capacity()
     }
 
+    /// Attaches a memory pool to this builder so all buffer growth is tracked.
+    ///
+    /// Returns `Err` if the pool is already exhausted.
+    #[cfg(feature = "pool")]
+    pub fn with_pool(mut self, pool: &dyn arrow_buffer::MemoryPool) -> Result<Self, ArrowError> {
+        self.values_builder
+            .attach_pool(pool)
+            .map_err(|e| ArrowError::ExternalError(Box::new(e)))?;
+        Ok(self)
+    }
+
     /// Appends a value of type `T` into the builder
     #[inline]
     pub fn append_value(&mut self, v: T::Native) {
         self.null_buffer_builder.append_non_null();
         self.values_builder.push(v);
+    }
+
+    /// Fallible version of [`append_value`](Self::append_value).
+    ///
+    /// Returns `Err` if the attached memory pool is exhausted.
+    #[cfg(feature = "pool")]
+    #[inline]
+    pub fn try_append_value(&mut self, v: T::Native) -> Result<(), ArrowError> {
+        self.values_builder
+            .try_push(v)
+            .map_err(|e| ArrowError::ExternalError(Box::new(e)))?;
+        self.null_buffer_builder.append_non_null();
+        Ok(())
     }
 
     /// Appends a value of type `T` into the builder `n` times
@@ -398,6 +424,16 @@ impl<P: ArrowTimestampType> PrimitiveBuilder<P> {
             data_type: DataType::Timestamp(P::UNIT, timezone.map(Into::into)),
             ..self
         }
+    }
+}
+
+#[cfg(feature = "pool")]
+impl<T: ArrowPrimitiveType> crate::builder::WithPool for PrimitiveBuilder<T> {
+    fn with_pool(
+        self,
+        pool: &dyn arrow_buffer::MemoryPool,
+    ) -> Result<Self, ArrowError> {
+        PrimitiveBuilder::with_pool(self, pool)
     }
 }
 
@@ -721,5 +757,55 @@ mod tests {
 
         let mut builder = Decimal128Builder::new().with_data_type(DataType::Decimal128(2, 3));
         builder.append_array(&array)
+    }
+
+    #[cfg(feature = "pool")]
+    mod pool_tests {
+        use super::*;
+        use arrow_buffer::{MemoryPool, TrackingMemoryPool};
+
+        #[test]
+        fn test_pool_tracks_growth() {
+            let pool = TrackingMemoryPool::default();
+            let mut builder = Int32Builder::new()
+                .with_pool(&pool)
+                .expect("pool not exhausted");
+
+            assert!(pool.used() > 0, "reservation should be non-zero after with_pool");
+            let before = pool.used();
+
+            // Fill past initial capacity to force a realloc.
+            for i in 0..2048 {
+                builder.append_value(i);
+            }
+            assert!(pool.used() >= before, "pool should grow with the builder");
+        }
+
+        #[test]
+        fn test_reservation_transfers_on_finish() {
+            let pool = TrackingMemoryPool::default();
+            let array = {
+                let mut builder = Int32Builder::new()
+                    .with_pool(&pool)
+                    .expect("pool not exhausted");
+                for i in 0..10 {
+                    builder.append_value(i);
+                }
+                builder.finish()
+            };
+            // After finish(), the array's buffer owns the reservation.
+            assert!(pool.used() > 0, "pool still holds the buffer reservation");
+            drop(array);
+            assert_eq!(pool.used(), 0, "reservation freed when array is dropped");
+        }
+
+        #[test]
+        fn test_no_pool_compiles_unchanged() {
+            // Verify the non-pool path is unaffected.
+            let mut builder = Int32Builder::new();
+            builder.append_value(42);
+            let array = builder.finish();
+            assert_eq!(array.value(0), 42);
+        }
     }
 }

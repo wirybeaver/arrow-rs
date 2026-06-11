@@ -15,6 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
+use crate::builder::tracked_vec::TrackedVec;
 use crate::builder::ArrayBuilder;
 use crate::types::{ByteArrayType, GenericBinaryType, GenericStringType};
 use crate::{Array, ArrayRef, GenericByteArray, OffsetSizeTrait};
@@ -29,8 +30,8 @@ use std::sync::Arc;
 /// For building strings, see docs on [`GenericStringBuilder`].
 /// For building binary, see docs on [`GenericBinaryBuilder`].
 pub struct GenericByteBuilder<T: ByteArrayType> {
-    value_builder: Vec<u8>,
-    offsets_builder: Vec<T::Offset>,
+    value_builder: TrackedVec<u8>,
+    offsets_builder: TrackedVec<T::Offset>,
     null_buffer_builder: NullBufferBuilder,
 }
 
@@ -47,10 +48,10 @@ impl<T: ByteArrayType> GenericByteBuilder<T> {
     /// - `data_capacity` is the total number of bytes of data to pre-allocate
     ///   (for all items, not per item).
     pub fn with_capacity(item_capacity: usize, data_capacity: usize) -> Self {
-        let mut offsets_builder = Vec::with_capacity(item_capacity + 1);
+        let mut offsets_builder = TrackedVec::with_capacity(item_capacity + 1);
         offsets_builder.push(T::Offset::from_usize(0).unwrap());
         Self {
-            value_builder: Vec::with_capacity(data_capacity),
+            value_builder: TrackedVec::with_capacity(data_capacity),
             offsets_builder,
             null_buffer_builder: NullBufferBuilder::new(item_capacity),
         }
@@ -67,9 +68,10 @@ impl<T: ByteArrayType> GenericByteBuilder<T> {
         value_buffer: MutableBuffer,
         null_buffer: Option<MutableBuffer>,
     ) -> Self {
-        let offsets_builder: Vec<T::Offset> =
-            ScalarBuffer::<T::Offset>::from(offsets_buffer).into();
-        let value_builder: Vec<u8> = ScalarBuffer::<u8>::from(value_buffer).into();
+        let offsets_builder: TrackedVec<T::Offset> =
+            Vec::<T::Offset>::from(ScalarBuffer::<T::Offset>::from(offsets_buffer)).into();
+        let value_builder: TrackedVec<u8> =
+            Vec::<u8>::from(ScalarBuffer::<u8>::from(value_buffer)).into();
 
         let null_buffer_builder = null_buffer
             .map(|buffer| NullBufferBuilder::new_from_buffer(buffer, offsets_builder.len() - 1))
@@ -85,6 +87,36 @@ impl<T: ByteArrayType> GenericByteBuilder<T> {
     #[inline]
     fn next_offset(&self) -> T::Offset {
         T::Offset::from_usize(self.value_builder.len()).expect("byte array offset overflow")
+    }
+
+    /// Attaches a memory pool to this builder so all buffer growth is tracked.
+    ///
+    /// Returns `Err` if the pool is already exhausted.
+    #[cfg(feature = "pool")]
+    pub fn with_pool(mut self, pool: &dyn arrow_buffer::MemoryPool) -> Result<Self, ArrowError> {
+        self.value_builder
+            .attach_pool(pool)
+            .map_err(|e| ArrowError::ExternalError(Box::new(e)))?;
+        self.offsets_builder
+            .attach_pool(pool)
+            .map_err(|e| ArrowError::ExternalError(Box::new(e)))?;
+        Ok(self)
+    }
+
+    /// Fallible version of [`append_value`](Self::append_value).
+    ///
+    /// Returns `Err` if the attached memory pool is exhausted.
+    #[cfg(feature = "pool")]
+    #[inline]
+    pub fn try_append_value(&mut self, value: impl AsRef<T::Native>) -> Result<(), ArrowError> {
+        self.value_builder
+            .try_extend_from_slice(value.as_ref().as_ref())
+            .map_err(|e| ArrowError::ExternalError(Box::new(e)))?;
+        self.offsets_builder
+            .try_push(self.next_offset())
+            .map_err(|e| ArrowError::ExternalError(Box::new(e)))?;
+        self.null_buffer_builder.append(true);
+        Ok(())
     }
 
     /// Appends a value into the builder.
@@ -302,6 +334,16 @@ impl<T: ByteArrayType, V: AsRef<T::Native>> Extend<Option<V>> for GenericByteBui
         for v in iter {
             self.append_option(v)
         }
+    }
+}
+
+#[cfg(feature = "pool")]
+impl<T: ByteArrayType> crate::builder::WithPool for GenericByteBuilder<T> {
+    fn with_pool(
+        self,
+        pool: &dyn arrow_buffer::MemoryPool,
+    ) -> Result<Self, ArrowError> {
+        GenericByteBuilder::with_pool(self, pool)
     }
 }
 

@@ -235,6 +235,30 @@
 pub use arrow_buffer::BooleanBufferBuilder;
 pub use arrow_buffer::NullBufferBuilder;
 
+mod tracked_vec;
+
+#[cfg(feature = "pool")]
+pub use with_pool::WithPool;
+#[cfg(feature = "pool")]
+mod with_pool {
+    use arrow_schema::ArrowError;
+
+    /// Marker trait for builders that support pool-backed memory tracking.
+    ///
+    /// Implement this on a builder to allow it to be composed inside
+    /// [`GenericListBuilder`](super::GenericListBuilder) with pool propagation.
+    pub trait WithPool: Sized {
+        /// Attach a memory pool to this builder.
+        ///
+        /// Every subsequent allocation is tracked against `pool`. Returns `Err`
+        /// if the pool is already exhausted.
+        fn with_pool(
+            self,
+            pool: &dyn arrow_buffer::MemoryPool,
+        ) -> Result<Self, ArrowError>;
+    }
+}
+
 mod boolean_builder;
 pub use boolean_builder::*;
 mod buffer_builder;

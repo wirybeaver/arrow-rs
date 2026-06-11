@@ -99,6 +99,23 @@ impl NullBufferBuilder {
         }
     }
 
+    /// Creates a new builder with pool-backed bitmap tracking.
+    ///
+    /// Unlike [`new`](Self::new), this eagerly allocates the bitmap so that
+    /// every bit is tracked in the pool from the start.
+    #[cfg(feature = "pool")]
+    pub fn with_pool(
+        capacity: usize,
+        pool: &dyn crate::pool::MemoryPool,
+    ) -> Result<Self, crate::pool::MemoryAllocationError> {
+        let bitmap_builder = Some(BooleanBufferBuilder::with_pool(capacity, pool)?);
+        Ok(Self {
+            bitmap_builder,
+            len: 0,
+            capacity,
+        })
+    }
+
     /// Appends `n` `true`s into the builder
     /// to indicate that these `n` items are not nulls.
     #[inline]

@@ -847,6 +847,32 @@ impl MutableBuffer {
     pub fn claim(&self, pool: &dyn MemoryPool) {
         *self.reservation.lock().unwrap() = Some(pool.reserve(self.capacity()));
     }
+
+    /// Allocate a new [`MutableBuffer`] with the given capacity and register it
+    /// with the provided [`MemoryPool`] from the start.
+    ///
+    /// Unlike [`MutableBuffer::with_capacity`] followed by [`MutableBuffer::claim`],
+    /// this method calls [`MemoryPool::try_reserve`] so that a limit-enforcing pool
+    /// can reject the allocation before memory is used.
+    #[cfg(feature = "pool")]
+    pub fn with_pool(
+        capacity: usize,
+        pool: &dyn MemoryPool,
+    ) -> Result<Self, crate::pool::MemoryAllocationError> {
+        let buf = Self::with_capacity(capacity);
+        let reservation = pool.try_reserve(buf.layout.size())?;
+        *buf.reservation.lock().unwrap() = Some(reservation);
+        Ok(buf)
+    }
+
+    /// Replace the pool reservation of this buffer.
+    ///
+    /// Used internally to transfer a reservation from a `TrackedVec` into the
+    /// `MutableBuffer` produced by `finish()`.
+    #[cfg(feature = "pool")]
+    pub fn set_reservation(&mut self, reservation: Option<Box<dyn MemoryReservation>>) {
+        *self.reservation.lock().unwrap() = reservation;
+    }
 }
 
 /// Creates a non-null pointer with alignment of [`ALIGNMENT`]
