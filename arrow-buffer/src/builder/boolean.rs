@@ -73,6 +73,20 @@ impl BooleanBufferBuilder {
         s
     }
 
+    /// Creates a new `BooleanBufferBuilder` tracked by the given [`MemoryPool`].
+    ///
+    /// The pool is consulted via [`MemoryPool::try_reserve`] so that a
+    /// limit-enforcing pool can reject the allocation before memory is used.
+    #[cfg(feature = "pool")]
+    pub fn with_pool(
+        capacity: usize,
+        pool: &dyn crate::pool::MemoryPool,
+    ) -> Result<Self, crate::pool::MemoryAllocationError> {
+        let byte_capacity = crate::bit_util::ceil(capacity, 8);
+        let buffer = crate::MutableBuffer::with_pool(byte_capacity, pool)?;
+        Ok(Self { buffer, len: 0 })
+    }
+
     /// Returns the length of the buffer
     #[inline]
     pub fn len(&self) -> usize {
